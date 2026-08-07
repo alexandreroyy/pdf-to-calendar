@@ -29,6 +29,37 @@ if not all_games:
     exit()
 print(f"Parsed {len(all_games)} games from PDFs.")
 
+def surface_and_calibre(game):
+    """Return (surface_name, calibre) for a game, cleaned for the note.
+
+    Two PDF layouts occur. In the clean one the calibre sits in its own column
+    ("M3 (Interligue)"). In the crammed one the whole row lands in the surface
+    field ("Équipe Loiselle et Masse (St-Aug ext) C3 (Saint-Aug) Roy Alexandre")
+    and the calibre column is empty. Both share the shape
+    "<surface> (<loc>) <calibre> ... <name>", so:
+      - surface name = the text before the first "(" (the location tag),
+      - calibre      = the calibre column if present, else the token right after
+                       the first ")"; only the FIRST token is kept, dropping any
+                       "(...)" or trailing words (e.g. "M2 interligues" -> "M2").
+    """
+    surface_full = game["surface"]
+    calibre = (game.get("calibre") or "").strip()
+
+    open_paren = surface_full.find("(")
+    if open_paren != -1:
+        surface_name = surface_full[:open_paren].strip()
+    else:
+        surface_name = re.sub(r"\s*\(.*?\)", "", surface_full).strip()
+
+    if not calibre and open_paren != -1:
+        close_paren = surface_full.find(")", open_paren)
+        if close_paren != -1:
+            calibre = surface_full[close_paren + 1:].strip()
+
+    calibre = calibre.split()[0] if calibre else ""
+    return surface_name, calibre
+
+
 def split_into_blocks(games_list, gap_minutes=90):
     """Group consecutive games into blocks; a new block starts when gap exceeds gap_minutes."""
     blocks = []
@@ -68,7 +99,7 @@ for game in all_games:
         continue
 
     grouped[cal_name][game["date"]].append(
-        {"start": game["time"], "surface": surface_full}
+        {"start": game["time"], "surface": surface_full, "calibre": game.get("calibre", "")}
     )
 
 total_events_created = 0
@@ -124,21 +155,38 @@ for cal_name, days in grouped.items():
                     datetime_errors += 1
                     continue
 
-                surface_counts = {}
+                # block is already sorted by start time, so both the surface order and
+                # the calibres inside each surface come out in the order they're played
+                surface_calibres = {}
                 for g in block:
-                    surface_full = g["surface"]
-                    surface_name = re.sub(r"\s*\(.*?\)", "", surface_full).strip()
-                    surface_counts[surface_name] = surface_counts.get(surface_name, 0) + 1
+                    surface_name, calibre = surface_and_calibre(g)
+                    surface_calibres.setdefault(surface_name, []).append(calibre)
 
-                surface_details = [f"{surf}: {count} game{'s' if count > 1 else ''}"
-                                 for surf, count in sorted(surface_counts.items())]
-                description = ", ".join(surface_details)
+                # One "<surface>" header per surface, followed by its calibres:
+                #   Tapis Xtra 5 games
+                #   C3 M2 C3- C2 C2
+                #   Giguère Portes et Fenêtres 2 games
+                #   M13 M16
+                # With a single surface the game count is dropped (the event title
+                # already says it), so it's just "Tapis Xtra" then the calibres.
+                show_counts = len(surface_calibres) > 1
+                lines = []
+                for surf, cals in surface_calibres.items():
+                    if show_counts:
+                        lines.append(f"{surf} {len(cals)} game{'s' if len(cals) > 1 else ''}")
+                    else:
+                        lines.append(surf)
+                    played = [c for c in cals if c]
+                    if played:
+                        lines.append(" ".join(played))
+
+                description = "\n".join(lines)
                 n = len(block)
                 event_name = f"{n} game{'s' if n > 1 else ''}"
 
                 start_date_str = start_dt.strftime("%B %d, %Y %H:%M:%S")
                 end_date_str = end_time_dt.strftime("%B %d, %Y %H:%M:%S")
-                description_escaped = description.replace('"', '\\"')
+                description_escaped = description.replace('"', '\\"').replace("\n", '" & linefeed & "')
                 event_name_escaped = event_name.replace('"', '\\"')
 
                 # Check for duplicate events by checking events on the same day with same summary
